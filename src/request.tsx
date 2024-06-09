@@ -3,13 +3,11 @@ import { type OpenAPIV3_1 } from 'openapi-types';
 import {
   Accordion,
   Badge,
+  Button,
   Select,
+  TextInput,
 } from "flowbite-react";
 import { useState } from 'react';
-
-function capitalize(a: string): string {
-  return a.charAt(0).toUpperCase() + a.slice(1);
-}
 
 interface FormObject {
   name: string,
@@ -17,34 +15,38 @@ interface FormObject {
   type: string,
   isRequired: boolean | undefined
   in: string
+  isValid: boolean,
+  value: string,
+  validationFn?: (value: string) => string | undefined
 }
 
 /**
  * gets parameters for an API like headers, path param or query
  * 
  * @param pathItem the main root object of the API
- * @param fieldsRef received object by reference for storing default field values
- * @param validationRef received object by reference for storing field validations
  * @returns array of FieldObject
  */
-function getParamFields(pathItem: OpenAPIV3_1.OperationObject, fieldsRef: any, validationRef: any): FormObject[] {
+function getParamFields(pathItem: OpenAPIV3_1.OperationObject): FormObject[] {
   let formFields: FormObject[] = [];
   if (!pathItem.parameters) return formFields;
 
   for (let param of pathItem.parameters as OpenAPIV3_1.ParameterObject[]) {
-    fieldsRef[param.name] = ""
-    const ff = {
+    // form field
+    const ff: FormObject = {
       name: param.name,
       description: param.description,
       type: 'string',
       isRequired: param.required,
-      in: param.in
+      in: param.in,
+      isValid: true,
+      value: "",
     };
-    formFields.push(ff);
 
     if (ff.isRequired) {
-      validationRef[ff.name] = (value: string) => value.length > 0 ? null : `${ff.name} is required`
+      ff.validationFn = (value: string) => value.length > 0 ? undefined : `${ff.name} is required`
     }
+
+    formFields.push(ff);
   }
 
   return formFields;
@@ -58,11 +60,9 @@ function getParamFields(pathItem: OpenAPIV3_1.OperationObject, fieldsRef: any, v
  * API request.```
  * 
  * @param pathItem the main root object of the API
- * @param fieldsRef received object by reference for storing default field values
- * @param validationRef received object by reference for storing field validations
  * @returns array of FieldObject
  */
-function getBodyFields(pathItem: OpenAPIV3_1.OperationObject, fieldsRef: any, validationRef: any): FormObject[] {
+function getBodyFields(pathItem: OpenAPIV3_1.OperationObject): FormObject[] {
   let formFields: FormObject[] = [];
   if (!pathItem.requestBody) return formFields;
 
@@ -77,20 +77,22 @@ function getBodyFields(pathItem: OpenAPIV3_1.OperationObject, fieldsRef: any, va
   switch (schema.type) {
     case "object":
       for (const prop of Object.keys(schema.properties as OpenAPIV3_1.SchemaObject)) {
-        fieldsRef[prop] = '';
 
-        const ff = {
+        const ff: FormObject = {
           name: prop,
           description: schema.properties![prop]?.description, // TODO: proper null check here
           type: schema.type,
           isRequired: schema.required?.includes(prop),
-          in: 'body'
+          in: 'body',
+          isValid: true,
+          value: ''
         };
-        formFields.push(ff);
 
         if (ff.isRequired) {
-          validationRef[ff.name] = (value: string) => value.length > 0 ? null : `${ff.name} is required`
+          ff.validationFn = (value: string) => value.length > 0 ? undefined : `${ff.name} is required`
         }
+
+        formFields.push(ff);
       }
       break;
     // TODO: case "array":
@@ -99,16 +101,6 @@ function getBodyFields(pathItem: OpenAPIV3_1.OperationObject, fieldsRef: any, va
   }
 
   return formFields;
-}
-
-function FormLabelComponent(props: { name: string, in: string, isRequired: boolean | undefined }) {
-  return (<p>
-    {props.name}
-    <span style={{ fontSize: '10px' }}>
-      <i>({props.in})</i>
-      {props.isRequired && <span style={{ color: 'red' }}>*</span>}
-    </span>
-  </p>)
 }
 
 function RequestComponent(props: { req: OpenAPIV3_1.PathsObject }) {
@@ -145,20 +137,49 @@ function RequestComponent(props: { req: OpenAPIV3_1.PathsObject }) {
       return <ErrorComponent msg='unknown HTTP method' />
   }
 
-  let fields = {},
-    validation = {};
   // these are non-body inputs, like headers, params and query
-  const paramFields = getParamFields(pathItemObject, fields, validation);
+  const paramFields = getParamFields(pathItemObject);
   formFields.push(...paramFields);
 
-  const bodyFields = getBodyFields(pathItemObject, fields, validation);
+  const bodyFields = getBodyFields(pathItemObject);
   formFields.push(...bodyFields);
 
 
   const [selectedServer, setServer] = useState(pathItemObject?.servers?.at(0)?.url);
   const [response, setResponse] = useState("");
 
-  const startFetching = async (payload: any) => {
+  const [fieldState, setFieldState] = useState(formFields);
+
+  const hasInvalidFields = (): boolean => {
+    let dirty = false;
+    const nfs = fieldState.map(field => {
+      // check if there is any validation function and you check fof validity if it exists
+      if (field.validationFn && field.validationFn(field.value)) {
+        // new field state
+        field.isValid = false;
+        dirty = true;
+      }
+      return field;
+    });
+
+    if (dirty) {
+      setFieldState(nfs);
+    }
+    return dirty;
+  }
+
+  const clearInvalidFields = () => {
+    const nfs = fieldState.map(fs => {
+      fs.isValid = true;
+      return fs;
+    });
+    setFieldState(nfs);
+  }
+
+  const startFetching = async () => {
+    if (hasInvalidFields()) return;
+    clearInvalidFields()
+
     // TODO: remove this!!
     let media = {};
     switch (method) {
@@ -169,8 +190,33 @@ function RequestComponent(props: { req: OpenAPIV3_1.PathsObject }) {
           // TODO: support other medias
           default:
             const params = new URLSearchParams();
-            for (let key in payload) { params.set(key, payload[key]) }
-            let res = await fetch(`${selectedServer}${path}?${params.toString}`);
+            const headers: HeadersInit = {
+              "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36",
+              "Accept": "application/json, text/plain, */*",
+              "sec-ch-ua-platform": "Android",
+              "sec-ch-ua-mobile": "?1",
+            };
+            for (let field of fieldState) {
+              switch (field.in) {
+                case "header":
+                  headers[field.name] = field.value;
+                  break;
+                case "param":
+                  params.set(field.name, field.value);
+                  break;
+                default:
+                  continue;
+              }
+            }
+
+            const options: RequestInit = {
+              method: "GET",
+              cache: "no-cache",
+              headers,
+            };
+
+            console.log('options:', options);
+            let res = await fetch(`${selectedServer}${path}?${params.toString()}`, options);
             if (!pathItemObject?.responses) {
               // assume that response is a JSON one
               res = await res.json();
@@ -187,7 +233,6 @@ function RequestComponent(props: { req: OpenAPIV3_1.PathsObject }) {
     }
   };
 
-  // TODO: hardcoded value of 1 accordian to be fixed
   return (
     <>
       <Accordion collapseAll>
@@ -203,7 +248,7 @@ function RequestComponent(props: { req: OpenAPIV3_1.PathsObject }) {
             <div className="max-w-md">
               <div className="mb-2 block">
               </div>
-              <Select id="servers" required>
+              <Select id="servers" required onChange={(e) => setServer(e.target.value)}>
                 {pathItemObject?.servers?.length && pathItemObject?.servers?.map(s => <option>{s.url}</option>)}
               </Select>
             </div>
@@ -211,7 +256,25 @@ function RequestComponent(props: { req: OpenAPIV3_1.PathsObject }) {
             {pathItemObject?.description}
 
             <div style={{ padding: '1em' }}>
+              {fieldState.map((ff, fi) => {
+                return (<TextInput
+                  color={ff.isValid ? 'grey' : 'failure'}
+                  onChange={(e) => {
+                    // new field state
+                    const nfs = fieldState.map((fs, nfi) => {
+                      if (nfi == fi) {
+                        fs.value = e.target.value;
+                      }
+                      return fs;
+                    });
+                    setFieldState(nfs);
+                  }}
+                  value={ff.value}
+                  placeholder={ff.name}
+                  helperText={ff.description} />)
+              })}
 
+              <Button outline gradientDuoTone="purpleToPink" onClick={startFetching}>Send</Button>
             </div>
 
 
